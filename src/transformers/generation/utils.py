@@ -3998,22 +3998,39 @@ class GenerationMixin:
                 start_from_empty_dynamic_cache = True
 
         this_peer_finished = False
+        
+        # 수정 ########################################################################
+        current_num_token = 2
+        candidate_generator.num_assistant_tokens = current_num_token
+        pipelining_rejection = True
+        ##############################################################################
+        
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
-            cur_len = input_ids.shape[-1]
+            if pipelining_rejection:
+                print("miss: ", end="")
+                # 만약 Pileplining이 Rejection된 경우 (PPT찹고)
+                candidate_generator.num_assistant_tokens = current_num_token
+                
+                cur_len = input_ids.shape[-1]
 
-            #  1. Fetch candidate sequences from a `CandidateGenerator`
-            candidate_input_ids, candidate_logits = candidate_generator.get_candidates(input_ids)
-            candidate_input_ids = candidate_input_ids.to(self.device)
-            if candidate_logits is not None:
-                candidate_logits = candidate_logits.to(self.device)
+                #  1. Fetch candidate sequences from a `CandidateGenerator`
+                candidate_input_ids, candidate_logits = candidate_generator.get_candidates(input_ids)
+                candidate_input_ids = candidate_input_ids.to(self.device)
+                if candidate_logits is not None:
+                    candidate_logits = candidate_logits.to(self.device)
 
-            candidate_length = candidate_input_ids.shape[1] - input_ids.shape[1]
-            is_done_candidate = stopping_criteria(candidate_input_ids, None)
+                candidate_length = candidate_input_ids.shape[1] - input_ids.shape[1]
 
-            # 2. Use the original model to obtain the next token logits given the candidate sequence. We obtain
-            # `candidate_length + 1` relevant logits from this process: in the event that all candidates are correct,
-            # we use this forward pass to also pick the subsequent logits in the original model.
+                is_done_candidate = stopping_criteria(candidate_input_ids, None)
 
+                # 2. Use the original model to obtain the next token logits given the candidate sequence. We obtain
+                # `candidate_length + 1` relevant logits from this process: in the event that all candidates are correct,
+                # we use this forward pass to also pick the subsequent logits in the original model.
+                
+                pipelining_rejection = False
+                
+            
+            
             # 2.1. Prepare the model inputs
             candidate_kwargs = copy.copy(model_kwargs)
             candidate_kwargs = _prepare_attention_mask(
@@ -4077,7 +4094,7 @@ class GenerationMixin:
                 if is_done_candidate and n_matches == candidate_length:
                     n_matches -= 1
                 valid_tokens = selected_tokens[:, : n_matches + 1]
-
+            
             # 4. Update variables according to the number of matching assistant tokens. Remember: the token generated
             # by the model after the last candidate match is also valid, as it is generated from a correct sequence.
             # Because of this last token, assisted generation search reduces to a normal greedy search/sample if there
@@ -4088,7 +4105,37 @@ class GenerationMixin:
             if streamer is not None:
                 streamer.put(valid_tokens.cpu())
             new_cur_len = input_ids.shape[-1]
+            
 
+            # For Pipelining #########################################################################
+            # 사실 이 부분은 과거에 해당한다.
+            # 구현 편의상 여기에다 구현한 것이다.
+            print(candidate_length, int(n_matches.item()))
+            if candidate_length == int(n_matches.item()): # 만약 이전 inference에서 draft model이 만든 token이 전부 맞았다면 진행..
+                
+                candidate_generator.num_assistant_tokens = current_num_token + 1 # 기존 num_assistant_tokens보다 하나 더 큰 수 만큼 inference를 draft model에서 진행.
+                
+                cur_len = input_ids.shape[-1]
+                
+                #  1. Fetch candidate sequences from a `CandidateGenerator`
+                candidate_input_ids, candidate_logits = candidate_generator.get_candidates(input_ids[:,:-1]) # Target Model이 예측한 거 빼고 inference 진행
+                candidate_input_ids = candidate_input_ids.to(self.device)
+                if candidate_logits is not None:
+                    candidate_logits = candidate_logits.to(self.device)
+
+                candidate_length = candidate_input_ids.shape[1] - input_ids.shape[1]
+                
+                is_done_candidate = stopping_criteria(candidate_input_ids, None)
+
+                if candidate_input_ids[0][-current_num_token-1] != input_ids[0][-1]: # target model이 예측한 token과 이전 draft model이 예측한 첫번째 token이 같아야 한다.
+                    pipelining_rejection = True
+                else:
+                    print("hit : ", end="")
+            else:
+                pipelining_rejection = True
+            ##########################################################################################
+            
+            
             # 4.2. Discard past key values relative to unused assistant tokens
             new_cache_size = new_cur_len - 1
             outputs.past_key_values = _crop_past_key_values(self, outputs.past_key_values, new_cache_size)

@@ -257,9 +257,9 @@ class AssistedCandidateGenerator(CandidateGenerator):
             "heuristic_transient",
         }:
             if num_matches == int(self.num_assistant_tokens):
-                self.num_assistant_tokens += 2.0
+                self.num_assistant_tokens += 0.0
             else:
-                self.num_assistant_tokens = max(1.0, self.num_assistant_tokens - 1.0)
+                self.num_assistant_tokens = max(1.0, self.num_assistant_tokens - 0.0)
 
 
 class PromptLookupCandidateGenerator(CandidateGenerator):
